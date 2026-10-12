@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Air quality - rolling average</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 1.5rem; max-width: 1100px; }
+  .bar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .5rem; }
+  input[type=text] { padding: 4px 6px; }
+  table { border-collapse: collapse; margin-top: 1rem; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  small { color: #777; }
+  #status { color: #555; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<h3>Air quality - rolling average</h3>
+
+<div class="bar">
+  <label>API base <input id="base" type="text" size="42" value="http://localhost:8000"></label>
+  <label><input id="auto" type="checkbox"> refresh every 30s</label>
+</div>
+<div class="bar">
+  <button data-path="/cities">All cities (Belgium)</button>
+  <button data-path="/locations?active=true">Active locations</button>
+  <input id="city" type="text" placeholder="City, e.g. Anderlecht">
+  <button id="cityGo">Go</button>
+  <input id="loc" type="text" placeholder="Location ID" size="10">
+  <button id="locGo">Go</button>
+</div>
+<div id="status"></div>
+<div id="out"></div>
+<details><summary>Raw JSON</summary><pre id="raw"></pre></details>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let currentPath = '/cities';
+
+async function load(path) {
+  currentPath = path;
+  const base = $('base').value.trim().replace(/\/$/, '');
+  $('status').textContent = 'Loading...';
+  try {
+    const res = await fetch(base + path);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    $('raw').textContent = JSON.stringify(data, null, 2);
+    render(data);
+    $('status').textContent = `Last ${data.window_hours}h, as of ${data.as_of_utc}`;
+  } catch (e) {
+    $('status').textContent = 'Error: ' + e.message;
+    $('out').innerHTML = '';
+  }
+}
+
+// Normalise every response shape into rows: {name, extra:{col:value}, measurements}
+function toRows(d) {
+  if (d.cities) return d.cities.map(c => ({ name: c.city, extra: {}, measurements: c.measurements }));
+  if (d.city) return [{ name: d.city, extra: {}, measurements: d.measurements }];
+  const loc = l => ({ name: l.location, extra: { city: l.city, lat: l.latitude.toFixed(4), lon: l.longitude.toFixed(4) }, measurements: l.measurements });
+  if (d.locations) return d.locations.map(loc);
+  if (d.location_id) return [loc(d)];
+  return [];
+}
+
+function render(data) {
+  const rows = toRows(data);
+  if (!rows.length) { $('out').innerHTML = '<p>No data in the window.</p>'; return; }
+  const extraCols = Object.keys(rows[0].extra);
+  const units = {};
+  rows.forEach(r => Object.entries(r.measurements).forEach(([p, s]) => units[p] = s.unit));
+  const params = Object.keys(units).sort();
+  let html = '<table><tr><th></th>' + extraCols.map(c => `<th>${esc(c)}</th>`).join('') +
+             params.map(p => `<th>${esc(p)} <small>${esc(units[p])}</small></th>`).join('') + '</tr>';
+  for (const r of rows) {
+    html += `<tr><td>${esc(r.name)}</td>` + extraCols.map(c => `<td>${esc(r.extra[c])}</td>`).join('') +
+      params.map(p => {
+        const s = r.measurements[p];
+        return s ? `<td>${s.avg} <small>(${s.count})</small></td>` : '<td></td>';
+      }).join('') + '</tr>';
+  }
+  $('out').innerHTML = html + '</table><small>values: average (number of readings)</small>';
+}
+
+document.querySelectorAll('button[data-path]').forEach(b => b.onclick = () => load(b.dataset.path));
+$('cityGo').onclick = () => $('city').value && load('/cities/' + encodeURIComponent($('city').value.trim()));
+$('locGo').onclick = () => $('loc').value && load('/locations/' + encodeURIComponent($('loc').value.trim()));
+setInterval(() => $('auto').checked && load(currentPath), 30000);
+load('/cities');
+</script>
+</body>
+</html>

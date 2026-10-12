@@ -1,0 +1,7 @@
+.*/
+*.pyc
+
+cloud_simulation/events/sns-event.json
+cloud_simulation/events/sqs-event.json
+cloud_simulation/events/sqs-events.json
+DM_Assignment.py

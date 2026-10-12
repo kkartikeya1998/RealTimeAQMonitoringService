@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Belgium air quality, last 3 hours</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --bg: #eef3f4; --panel: #ffffff; --ink: #14343b; --muted: #6b8389;
+    --line: #d3e0e2; --accent: #0f7c8a; --accent-ink: #ffffff; --warn: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1d21; --panel: #162a30; --ink: #e3f0f2; --muted: #8fa9af;
+      --line: #27424a; --accent: #4cc3d1; --accent-ink: #0f1d21; --warn: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header, main { max-width: 1280px; margin: 0 auto; padding: 16px 20px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  .sub { color: var(--muted); margin: 0 0 14px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  input[type=text] { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
+                     background: var(--panel); color: var(--ink); font: inherit; }
+  #base { flex: 1 1 360px; }
+  button { padding: 7px 14px; border: 0; border-radius: 6px; background: var(--accent);
+           color: var(--accent-ink); font: inherit; cursor: pointer; }
+  button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+            padding: 16px; margin-bottom: 16px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--panel); }
+  th { font-weight: 600; color: var(--muted); }
+  td small { display: block; color: var(--muted); font-size: .75rem; }
+  .none { color: var(--muted); }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .city-link { background: none; color: var(--accent); padding: 0; text-decoration: underline; font-weight: 600; }
+  #status { color: var(--muted); }
+  #status.error { color: var(--warn); }
+  #map { height: 440px; border: 1px solid var(--line); border-radius: 8px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; color: var(--muted); font-size: .85rem; }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+  .popup { font: 13px system-ui, sans-serif; color: #14343b; }  /* popups stay white in dark mode */
+  .popup table { margin-top: 6px; }
+  .popup th, .popup td, .popup td:first-child, .popup th:first-child {
+    position: static; background: none; padding: 2px 8px; border: 0; color: #14343b; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Belgium air quality, last 3 hours</h1>
+  <p class="sub">Average per pollutant, with the number of measurements behind it.</p>
+  <div class="bar">
+    <input id="base" type="text" aria-label="Function URL" placeholder="https://xxxx.lambda-url.eu-west-1.on.aws">
+    <button id="reload">Load all cities</button>
+    <label><input id="auto" type="checkbox" checked> Refresh every 30 s</label>
+    <span id="status" role="status"></span>
+  </div>
+</header>
+
+<main>
+  <section>
+    <h2>City detail</h2>
+    <form class="bar" id="cityForm">
+      <input id="cityName" type="text" aria-label="City name" placeholder="City name, e.g. Leuven">
+      <button type="submit">Load city</button>
+    </form>
+    <div class="scroll" id="detail" style="margin-top:10px"></div>
+  </section>
+
+  <section>
+    <h2>Live map</h2>
+    <div id="map"></div>
+    <div class="legend">
+      <span><i style="background:#2e9e4f"></i>Safe</span>
+      <span><i style="background:#f2c200"></i>Elevated</span>
+      <span><i style="background:#d32f2f"></i>Risk</span>
+      <span><i style="background:#9e9e9e"></i>No rated data</span>
+      <span id="mapNote"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>All cities</h2>
+    <div class="scroll" id="all"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  // Order of columns in the table; matches the PARAMETERS list in the serve lambda.
+  const PARAMS = ["pm25","pm10","so2","no2","co","o3","bc","pm1","pm4","co2","no","nox","ch4","ufp"];
+
+  const $ = (id) => document.getElementById(id);
+  let timer = null;
+  let lastRows = [];
+
+  // Remember the endpoint between page loads (localStorage works for pages served from http://localhost).
+  try { $("base").value = localStorage.getItem("airmaxBase") || ""; } catch (e) {}
+
+  function baseUrl() {
+    return $("base").value.trim().replace(/\/+$/, "");
+  }
+
+  function setStatus(text, isError) {
+    $("status").textContent = text;
+    $("status").className = isError ? "error" : "";
+  }
+
+  async function getJson(path) {
+    const base = baseUrl();
+    if (!base) throw new Error("Paste your Function URL first.");
+    try { localStorage.setItem("airmaxBase", base); } catch (e) {}
+    const res = await fetch(base + path);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ("Request failed with status " + res.status));
+    return body;
+  }
+
+  // Both endpoints end up as the same row shape: { city, parameters, locations }.
+  const rowsFromAll = (obj) =>
+    Object.entries(obj).map(([city, v]) => ({ city, parameters: v.parameters, locations: v.locations }))
+          .sort((a, b) => a.city.localeCompare(b.city));
+
+  function cell(tr, text, small) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (small) { const s = document.createElement("small"); s.textContent = small; td.appendChild(s); }
+    tr.appendChild(td);
+    return td;
+  }
+
+  function renderTable(target, rows, linkCities) {
+    target.replaceChildren();
+    if (!rows.length) { target.textContent = "No data."; return; }
+
+    const table = document.createElement("table");
+    const head = table.createTHead().insertRow();
+    ["City", "Measurements", ...PARAMS].forEach((h) => {
+      const th = document.createElement("th"); th.textContent = h; head.appendChild(th);
+    });
+
+    const body = table.createTBody();
+    rows.forEach((row) => {
+      const tr = body.insertRow();
+      const first = document.createElement("td");
+      if (linkCities) {
+        const b = document.createElement("button");
+        b.className = "city-link"; b.type = "button"; b.textContent = row.city;
+        b.onclick = () => { $("cityName").value = row.city; loadCity(row.city); };
+        first.appendChild(b);
+      } else {
+        first.textContent = row.city;
+      }
+      tr.appendChild(first);
+
+      const total = PARAMS.reduce((n, p) => n + ((row.parameters[p] || {}).count || 0), 0);
+      cell(tr, total.toLocaleString());
+
+      PARAMS.forEach((p) => {
+        const d = row.parameters[p] || { average: null, count: 0, unit: null };
+        if (d.average === null) {
+          cell(tr, "–").className = "none";
+        } else {
+          const td = cell(tr, d.average.toFixed(1), "n=" + d.count + (d.unit ? " " + d.unit : ""));
+          const dot = levelDot(rate(p, d));
+          if (dot) { td.prepend(dot); td.title = dot.title; }
+        }
+      });
+    });
+    target.appendChild(table);
+  }
+
+  // ----- Live map -----
+  // POC: illustrative ranges (loosely WHO 24 h guidelines / EU limits). Agree the real ones with AirMax.
+  // parameter -> [expected unit, safe up to, elevated up to]; above that is risk.
+  // Parameters not listed here show in the popup but do not influence the colour.
+  const THRESHOLDS = {
+    pm25: ["\u00b5g/m\u00b3", 15, 35],   pm10: ["\u00b5g/m\u00b3", 45, 100],
+    no2:  ["\u00b5g/m\u00b3", 25, 100],  o3:   ["\u00b5g/m\u00b3", 100, 180],
+    so2:  ["\u00b5g/m\u00b3", 40, 125],  co:   ["\u00b5g/m\u00b3", 4000, 10000],
+  };
+  const COLORS = { none: "#9e9e9e", safe: "#2e9e4f", elevated: "#f2c200", risk: "#d32f2f" };
+  const SEVERITY = ["safe", "elevated", "risk"];  // least to most severe
+  const normUnit = (u) => (u || "").replace("\u03bc", "\u00b5");  // Greek mu -> micro sign
+
+  function rate(p, d) {
+    const rule = THRESHOLDS[p];
+    if (!rule || d.average === null || normUnit(d.unit) !== rule[0]) return null;  // never rate an unexpected unit
+    return d.average <= rule[1] ? "safe" : d.average <= rule[2] ? "elevated" : "risk";
+  }
+
+  function levelDot(level) {  // null when the parameter can't be rated
+    if (!level) return null;
+    const dot = document.createElement("i");
+    dot.className = "dot";
+    dot.style.background = COLORS[level];
+    dot.title = level;
+    return dot;
+  }
+
+  function cityStatus(params) {  // worst rated parameter; grey when nothing can be rated
+    let worst = -1;
+    for (const [p, d] of Object.entries(params)) {
+      const r = rate(p, d);
+      if (r) worst = Math.max(worst, SEVERITY.indexOf(r));
+    }
+    return worst < 0 ? "none" : SEVERITY[worst];
+  }
+
+  const map = L.map("map");
+  map.fitBounds([[49.5, 2.5], [51.6, 6.4]]);  // Belgium
+  // Basemap: plain OpenStreetMap tiles work without a key (fine for local development).
+  // For a quieter light/dark basemap, paste a free CARTO key from https://carto.com/basemaps/apikey
+  const CARTO_KEY = "cb1_49zl_1_b792e7f73e06ac36e14e6f9a";
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const tiles = CARTO_KEY
+    ? { url: "https://basemaps.cartocdn.com/rastertiles/" + (dark ? "dark_all" : "light_all") + "/{z}/{x}/{y}.png?key=" + CARTO_KEY,
+        attribution: "\u00a9 OpenStreetMap contributors \u00a9 CARTO" }
+    : { url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        attribution: "\u00a9 OpenStreetMap contributors" };
+  L.tileLayer(tiles.url, { maxZoom: 19, attribution: tiles.attribution }).addTo(map);
+
+  const markerLayer = L.layerGroup().addTo(map);
+  const markers = {};  // city name -> marker
+
+  function centroid(locs) {
+    const pts = locs.filter((l) => l.latitude != null && l.longitude != null);
+    if (!pts.length) return null;
+    return [pts.reduce((n, l) => n + l.latitude, 0) / pts.length,
+            pts.reduce((n, l) => n + l.longitude, 0) / pts.length];
+  }
+
+  function popupFor(row) {
+    const box = document.createElement("div");
+    box.className = "popup";
+    const title = document.createElement("b");
+    title.textContent = row.city;
+    box.appendChild(title);
+    const withData = PARAMS.filter((p) => row.parameters[p] && row.parameters[p].average !== null);
+    if (!withData.length) {
+      const none = document.createElement("div");
+      none.textContent = "No measurements in the last 3 hours";
+      box.appendChild(none);
+      return box;
+    }
+    const table = document.createElement("table");
+    withData.forEach((p) => {
+      const d = row.parameters[p], tr = table.insertRow();
+      const name = cell(tr, p), dot = levelDot(rate(p, d));
+      if (dot) name.prepend(dot);
+      cell(tr, d.average.toFixed(1)); cell(tr, d.unit || ""); cell(tr, "n=" + d.count);
+    });
+    box.appendChild(table);
+    return box;
+  }
+
+  // Called after every successful "all cities" fetch: redraws one dot per city.
+  function updateMap(rows) {
+    const openCity = Object.keys(markers).find((k) => markers[k].isPopupOpen());  // keep an open popup across refreshes
+    markerLayer.clearLayers();
+    Object.keys(markers).forEach((k) => delete markers[k]);
+    let shown = 0;
+    rows.forEach((row) => {
+      const pos = centroid(row.locations);
+      if (!pos) return;
+      markers[row.city] = L.circleMarker(pos, {
+        radius: 11, color: "#ffffff", weight: 2,
+        fillColor: COLORS[cityStatus(row.parameters)], fillOpacity: 0.9,
+      }).bindTooltip(row.city).bindPopup(popupFor(row)).addTo(markerLayer);
+      shown++;
+    });
+    $("mapNote").textContent = shown + " of " + rows.length + " cities on the map";
+    if (openCity && markers[openCity]) markers[openCity].openPopup();
+  }
+
+  function focusCity(name) {
+    const m = markers[name];
+    if (m) { map.flyTo(m.getLatLng(), Math.max(map.getZoom(), 10)); m.openPopup(); }
+  }
+
+  async function loadAll() {
+    try {
+      setStatus("Loading…");
+      lastRows = rowsFromAll(await getJson("/cities"));
+      renderTable($("all"), lastRows, true);
+      updateMap(lastRows);
+      setStatus("Updated " + new Date().toLocaleTimeString());
+    } catch (e) { setStatus(e.message, true); }
+  }
+
+  async function loadCity(name) {
+    if (!name.trim()) { setStatus("Enter a city name.", true); return; }
+    try {
+      setStatus("Loading…");
+      const d = await getJson("/cities/" + encodeURIComponent(name.trim()));
+      const rows = [{ city: d.city, parameters: d.parameters, locations: d.locations }];
+      renderTable($("detail"), rows, false);
+      focusCity(d.city);
+      setStatus("Updated " + new Date().toLocaleTimeString());
+    } catch (e) { $("detail").replaceChildren(); setStatus(e.message, true); }
+  }
+
+  $("reload").onclick = loadAll;
+  $("cityForm").onsubmit = (e) => { e.preventDefault(); loadCity($("cityName").value); };
+  $("auto").onchange = (e) => {
+    clearInterval(timer);
+    if (e.target.checked) timer = setInterval(() => {
+      loadAll();
+      if ($("cityName").value.trim()) loadCity($("cityName").value);
+    }, 30000);
+  };
+
+  $("auto").onchange({ target: $("auto") });  // auto refresh is on by default
+  if (baseUrl()) loadAll();
+</script>
+</body>
+</html>
