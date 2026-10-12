@@ -126,4 +126,4 @@ cloud_deployment/
 
 ## Finished Product
 
-![alt text](https://github.com/kkartikeya1998/RealTimeAQMonitoringService/tree/main/LAQM_Snapshot.png "Dashboard Snapshot")
+![alt text](LAQM_Snapshot.png "Dashboard Snapshot")
