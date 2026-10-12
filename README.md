@@ -122,3 +122,8 @@ cloud_deployment/
 - The local reader can operate in either live mode or replay mode, where the window is anchored to the newest stored measurement.
 - The deployed reader defaults to live mode.
 - The `/cities` endpoint uses table scans for locations and precomputed totals; this is appropriate for the current implementation but would require caching or a revised access pattern at production scale.
+
+
+## Finished Product
+
+![alt text](https://github.com/kkartikeya1998/RealTimeAQMonitoringService/tree/main/LAQM_Snapshot.png "Dashboard Snapshot")
